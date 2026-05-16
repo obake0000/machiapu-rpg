@@ -1,0 +1,1994 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<title>マチアプRPG</title>
+<style>
+  html,body{margin:0;background:#000;color:#fff;font-family:"DotGothic16","Yu Gothic UI","Meiryo UI",sans-serif;}
+  body{display:flex;justify-content:center;align-items:center;min-height:100vh;}
+  #wrap{display:flex;flex-direction:column;align-items:center;gap:8px;}
+  canvas{
+    background:#000;
+    image-rendering:pixelated;
+    border:4px solid #e8c46a;
+    box-shadow:0 0 20px #000;
+    display:block;
+    touch-action:none;
+  }
+  #status{
+    width:480px;
+    box-sizing:border-box;
+    padding:8px 14px;
+    background:#000;
+    border:2px solid #e8c46a;
+    color:#ffd966;
+    font-size:16px;
+    display:flex;
+    justify-content:space-around;
+    letter-spacing:2px;
+  }
+  #pad{
+    width:480px;
+    display:grid;
+    grid-template-columns:repeat(3,1fr);
+    grid-template-rows:repeat(3,52px);
+    gap:4px;
+    user-select:none;
+  }
+  #pad button{
+    background:#17172b;border:2px solid #e8c46a;color:#ffd966;font-size:22px;
+  }
+  #pad button:active{background:#3a3a6e;}
+  .hint{color:#888;font-size:12px;text-align:center;margin-top:4px;}
+</style>
+</head>
+<body>
+<div id="wrap">
+  <div id="status">
+    <span id="hp">❤️ HP 40/40</span>
+    <span id="lv">⭐ Lv.1</span>
+    <span id="gold">💰 10000円</span>
+  </div>
+  <canvas id="g" width="480" height="384"></canvas>
+  <div id="pad">
+    <button data-k="">　</button>
+    <button data-k="ArrowUp">▲</button>
+    <button data-k="">　</button>
+    <button data-k="ArrowLeft">◀</button>
+    <button data-k="Enter">●</button>
+    <button data-k="ArrowRight">▶</button>
+    <button data-k="">　</button>
+    <button data-k="ArrowDown">▼</button>
+    <button data-k="">　</button>
+  </div>
+  <div class="hint">矢印キーで移動 / ●（Enter）で決定</div>
+</div>
+
+<script>
+"use strict";
+
+// =========================================================
+// マチアプRPG (DQ1風 3分版)
+// =========================================================
+
+const cvs = document.getElementById("g");
+const ctx = cvs.getContext("2d");
+ctx.imageSmoothingEnabled = false;
+
+// =========================================================
+// AUDIO (Web Audio synth — no external files)
+// =========================================================
+const AC = new (window.AudioContext || window.webkitAudioContext)();
+let audioEnabled = false;
+let bgmTimer = null;
+let bgmKey = null;
+function unlockAudio(){
+  if(audioEnabled) return;
+  AC.resume().then(()=>{ audioEnabled = true; });
+}
+addEventListener("keydown", unlockAudio, {once:true});
+addEventListener("pointerdown", unlockAudio, {once:true});
+
+function tone(freq, dur, type="square", vol=0.08, delay=0){
+  if(!audioEnabled) return;
+  const t = AC.currentTime + delay;
+  const o = AC.createOscillator();
+  const g = AC.createGain();
+  o.type = type;
+  o.frequency.setValueAtTime(freq, t);
+  g.gain.setValueAtTime(0, t);
+  g.gain.linearRampToValueAtTime(vol, t+0.01);
+  g.gain.exponentialRampToValueAtTime(0.001, t + dur);
+  o.connect(g).connect(AC.destination);
+  o.start(t); o.stop(t + dur + 0.02);
+}
+function noise(dur, vol=0.08){
+  if(!audioEnabled) return;
+  const t = AC.currentTime;
+  const buf = AC.createBuffer(1, AC.sampleRate*dur, AC.sampleRate);
+  const d = buf.getChannelData(0);
+  for(let i=0;i<d.length;i++) d[i] = (Math.random()*2-1) * (1 - i/d.length);
+  const src = AC.createBufferSource(); src.buffer = buf;
+  const g = AC.createGain(); g.gain.value = vol;
+  src.connect(g).connect(AC.destination); src.start();
+}
+const SFX = {
+  step:        ()=> tone(180+Math.random()*60, 0.04, "square", 0.04),
+  encounter:   ()=> { tone(330,0.07,"square",0.1); tone(440,0.07,"square",0.1,0.07); tone(550,0.12,"square",0.1,0.14); },
+  cmdMove:     ()=> tone(440,0.04,"triangle",0.06),
+  attack:      ()=> { tone(900,0.05,"square",0.1); tone(500,0.08,"sawtooth",0.08,0.04); },
+  hit:         ()=> { noise(0.1,0.12); tone(110,0.15,"sawtooth",0.12); },
+  miss:        ()=> tone(140,0.2,"sine",0.08),
+  enemyAtk:    ()=> { noise(0.08,0.1); tone(200,0.18,"sawtooth",0.1); },
+  like:        ()=> tone(1320,0.05,"sine",0.06),
+  bonus:       ()=> { [659, 880, 1175].forEach((f,i)=>tone(f,0.1,"square",0.1,i*0.07)); },
+  victory:     ()=> { [523, 659, 784, 1047].forEach((f,i)=>tone(f,0.12,"square",0.1,i*0.09)); },
+  levelup:     ()=> { [392, 523, 659, 784, 1047].forEach((f,i)=>tone(f,0.15,"square",0.1,i*0.1)); },
+  defeat:      ()=> { [330, 247, 220, 165].forEach((f,i)=>tone(f,0.25,"sawtooth",0.1,i*0.15)); },
+  bossEnter:   ()=> { [110, 110, 130, 110].forEach((f,i)=>tone(f,0.3,"sawtooth",0.15,i*0.18)); },
+  intimacyUp:  ()=> { [659, 880].forEach((f,i)=>tone(f,0.15,"sine",0.08,i*0.1)); },
+  happyChime:  ()=> { [523, 659, 784, 1047, 1318].forEach((f,i)=>tone(f,0.2,"triangle",0.08,i*0.12)); },
+};
+
+const BGM_TRACKS = {
+  world:  { notes:[523,587,659,587,523,440,494,523, 587,659,698,659,587,523,494,440], beat:240, type:"triangle", vol:0.05 },
+  // 戦闘BGM：Aマイナー Am-F-G-Am。メロディ(square)+ベース(triangle) の2ch
+  battle: {
+    beat: 125,
+    melody: [
+      // Am: 上昇アルペジオ→下降
+      659, 523, 440, 523,  880, 659, 523, 440,
+      // F: より低く密度up
+      698, 523, 440, 523,  698, 523, 440, 349,
+      // G: 緊張感を上げる
+      784, 587, 392, 587,  784, 587, 494, 392,
+      // Am: 解決＋頂点
+      880, 659, 523, 659,  880, 659, 880, 1047,
+    ],
+    melodyType: "square", melodyVol: 0.05,
+    // ベース：1小節2回鳴り。A2-F2-G2-A2
+    bass: [110, 110, 87, 87, 98, 98, 110, 110],
+    bassStride: 4,
+    bassType: "triangle", bassVol: 0.10,
+  },
+  // ボス：3拍子寄り、暗い動機。tritone を挟む
+  boss: {
+    beat: 175,
+    melody: [
+      146, 0, 174, 0,  208, 0, 174, 0,
+      146, 174, 208, 247,  220, 208, 174, 146,
+      146, 0, 174, 0,  208, 0, 174, 0,
+      261, 247, 208, 174,  208, 174, 146, 130,
+    ],
+    melodyType: "sawtooth", melodyVol: 0.06,
+    bass: [73, 73, 87, 65, 73, 73, 65, 73],
+    bassStride: 4,
+    bassType: "triangle", bassVol: 0.10,
+  },
+  happy:  { notes:[523,659,784,1047, 880,784,659,523, 587,698,880,1047, 880,698,587,523], beat:280, type:"triangle", vol:0.05 },
+};
+function setBGM(k){
+  if(bgmKey === k) return;
+  bgmKey = k;
+  if(bgmTimer){ clearInterval(bgmTimer); bgmTimer = null; }
+  const tr = BGM_TRACKS[k];
+  if(!tr) return;
+  let i = 0;
+  bgmTimer = setInterval(()=>{
+    // メロディ：旧フォーマット (notes/type/vol) もサポート
+    const mel = tr.melody || tr.notes;
+    if(mel){
+      const n = mel[i % mel.length];
+      if(n) tone(n, tr.beat/1000 * 0.85, tr.melodyType || tr.type || "square", tr.melodyVol || tr.vol || 0.05);
+    }
+    // ベース：bassStride 拍ごとに長めの音
+    if(tr.bass){
+      const stride = tr.bassStride || 4;
+      if(i % stride === 0){
+        const b = tr.bass[Math.floor(i/stride) % tr.bass.length];
+        if(b) tone(b, tr.beat/1000 * stride * 0.9, tr.bassType || "triangle", tr.bassVol || 0.08);
+      }
+    }
+    i++;
+  }, tr.beat);
+}
+
+// ----- Image loading -----
+// 各キャラ画像は preprocess_sprites.py で白抜き済み _clean.png を使う。
+// (file:// では canvas getImageData が tainted で失敗するため事前に処理しておく)
+const SPRITE_FILES = {
+  hero:   "ChatGPT Image 2026年5月16日 22_28_58 (1)_clean.png",
+  troll:  "ChatGPT Image 2026年5月16日 22_28_58 (2)_clean.png",
+  succ:   "ChatGPT Image 2026年5月16日 22_28_58 (3)_clean.png",
+  queen:  "ChatGPT Image 2026年5月16日 22_32_46 (1)_clean.png",
+  kakou:  "ChatGPT Image 2026年5月16日 22_32_46 (2)_clean.png",
+  papa:   "ChatGPT Image 2026年5月16日 22_32_47 (3)_clean.png",
+  metal:  "ChatGPT Image 2026年5月16日 22_32_47 (4)_clean.png",
+  ghost:  "ChatGPT Image 2026年5月16日 22_32_47 (5)_clean.png",
+  bomb:   "ChatGPT Image 2026年5月16日 22_32_47 (6)_clean.png",
+  futsuu: "ChatGPT Image 2026年5月16日 22_32_47 (7)_clean.png",
+  tiles:  "ChatGPT Image 2026年5月16日 21_20_56 (7).png",
+  ui:     "ChatGPT Image 2026年5月16日 21_20_56 (8).png",
+  title:  "ChatGPT Image 2026年5月16日 21_20_59 (9).png",
+  bossbg: "ChatGPT Image 2026年5月16日 21_20_59 (10).png",
+  // プロローグ5枚
+  prologue1: "ChatGPT Image 2026年5月17日 00_39_21 (1).png",
+  prologue2: "ChatGPT Image 2026年5月17日 00_39_21 (2).png",
+  prologue3: "ChatGPT Image 2026年5月17日 00_39_22 (3).png",
+  prologue4: "ChatGPT Image 2026年5月17日 00_39_22 (4).png",
+  prologue5: "ChatGPT Image 2026年5月17日 00_39_22 (5).png",
+  // エンディング5枚（真エンド用）
+  ending1: "ChatGPT Image 2026年5月17日 00_38_13 (1).png",
+  ending2: "ChatGPT Image 2026年5月17日 00_38_13 (2).png",
+  ending3: "ChatGPT Image 2026年5月17日 00_38_14 (3).png",
+  ending4: "ChatGPT Image 2026年5月17日 00_38_14 (4).png",
+  ending5: "ChatGPT Image 2026年5月17日 00_38_14 (5).png",
+  // ゲームオーバー5枚（ランダム抽選）
+  gameover1: "ChatGPT Image 2026年5月17日 00_40_38 (1).png",
+  gameover2: "ChatGPT Image 2026年5月17日 00_40_38 (2).png",
+  gameover3: "ChatGPT Image 2026年5月17日 00_40_39 (3).png",
+  gameover4: "ChatGPT Image 2026年5月17日 00_40_39 (4).png",
+  gameover5: "ChatGPT Image 2026年5月17日 00_40_39 (5).png",
+};
+const IMG = {};
+let imagesReady = false;
+
+function loadImage(src){
+  return new Promise(res=>{
+    const img = new Image();
+    img.onload = ()=>res(img);
+    img.onerror = ()=>{console.warn("img fail:", src); res(null);};
+    img.src = encodeURI(src);
+  });
+}
+// Remove ChatGPT's checkered "transparent placeholder" background that is
+// baked into the PNG. Strategy: sample the 4 image corners as background
+// references and remove anything close to them, plus also kill any
+// near-white/light-gray low-saturation pixels.
+function chromaKeyImage(img){
+  if(!img) return null;
+  const c = document.createElement("canvas");
+  c.width = img.width; c.height = img.height;
+  const cx = c.getContext("2d");
+  cx.imageSmoothingEnabled = false;
+  cx.drawImage(img, 0, 0);
+  try {
+    const d = cx.getImageData(0, 0, c.width, c.height);
+    const p = d.data;
+    const W = c.width, H = c.height;
+    // Sample reference background colors from corners and edge midpoints
+    const samples = [
+      [0,0], [W-1,0], [0,H-1], [W-1,H-1],
+      [W>>1, 0], [W>>1, H-1], [0, H>>1], [W-1, H>>1],
+      [4,4], [W-5,4], [4,H-5], [W-5,H-5],
+    ];
+    const bgs = samples.map(([x,y])=>{
+      const i = (y*W + x)*4;
+      return [p[i], p[i+1], p[i+2], p[i+3]];
+    }).filter(s => s[3] > 0);  // skip already-transparent samples
+
+    function isBG(r, g, b){
+      // unsaturated + light → checker / white BG
+      const mx = Math.max(r,g,b), mn = Math.min(r,g,b);
+      if(mx >= 195 && (mx - mn) <= 24) return true;
+      // close to any corner sample
+      for(const [br,bg,bb] of bgs){
+        if(Math.abs(r-br) < 18 && Math.abs(g-bg) < 18 && Math.abs(b-bb) < 18) return true;
+      }
+      return false;
+    }
+    for(let i=0; i<p.length; i+=4){
+      if(isBG(p[i], p[i+1], p[i+2])){
+        p[i+3] = 0;
+      }
+    }
+    cx.putImageData(d, 0, 0);
+    return c;
+  } catch(e){
+    console.warn("chromaKey failed (probably file:// taint):", e.message);
+    return null;
+  }
+}
+
+async function loadAllImages(){
+  const keys = Object.keys(SPRITE_FILES);
+  await Promise.all(keys.map(async k=>{
+    IMG[k] = await loadImage(SPRITE_FILES[k]);
+  }));
+  // _clean.png は preprocess_sprites.py が flood-fill 済みなので再処理しない。
+  // (ランタイムの whitepoint 一律カットは肌や服の明部まで削って勇者が欠ける)
+  for(const k of ["hero","troll","succ","kakou","papa","queen","metal","ghost","bomb","futsuu"]){
+    if(!IMG[k]) continue;
+    const src = SPRITE_FILES[k] || "";
+    if(src.includes("_clean")) continue;
+    const keyed = chromaKeyImage(IMG[k]);
+    if(keyed) IMG[k] = keyed;
+  }
+  imagesReady = true;
+}
+
+// Sprite-sheet cell extraction: assumes sheets are 4 cols × 2 rows (8 cells)
+function spriteCell(img, col, row){
+  if(!img) return null;
+  const cw = img.width/4, ch = img.height/2;
+  return {img, sx: col*cw, sy: row*ch, sw: cw, sh: ch};
+}
+function drawSprite(cell, dx, dy, dw, dh){
+  if(!cell || !cell.img) return false;
+  ctx.drawImage(cell.img, cell.sx, cell.sy, cell.sw, cell.sh, dx, dy, dw, dh);
+  return true;
+}
+
+// Tile sheet is 4×2; tile mapping
+function tileCell(idx){
+  if(!IMG.tiles) return null;
+  return spriteCell(IMG.tiles, idx % 4, Math.floor(idx/4));
+}
+
+// Tinted version (for メタル variant): draws on offscreen
+function tintCanvas(srcImg, tint, alpha){
+  if(!srcImg) return null;
+  const c = document.createElement("canvas");
+  c.width = srcImg.width; c.height = srcImg.height;
+  const cx = c.getContext("2d");
+  cx.imageSmoothingEnabled = false;
+  cx.drawImage(srcImg, 0, 0);
+  cx.globalCompositeOperation = "source-atop";
+  cx.globalAlpha = alpha ?? 0.5;
+  cx.fillStyle = tint;
+  cx.fillRect(0,0,c.width,c.height);
+  return c;
+}
+
+const TS = 24;            // tile size
+const VIEW_COLS = 20;     // viewport
+const VIEW_ROWS = 16;
+// canvas 480x384
+
+// ----- Map tiles -----
+// W:wall .:floor H:home 2:草 3:ホテル街 5:城床 B:ボス G:普通の子(真エンド)
+// All rows must be exactly 32 characters
+// Long snake corridor: HOME → Z(登録ボーナス畑) → grass → hotel → grass → hotel → grass → castle → BOSS → GOAL
+// Each terrain stripe is 2 rows full-width; walls between stripes force zig-zag east-west traversal.
+const M = [
+//                1111111111222222222233
+//      0123456789012345678901234567890 1
+"WWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWW",  // 0
+"W..............................W",  // 1
+"W..H...........................W",  // 2 H=自宅
+"WZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZW",  // 3 登録ボーナスいいね畑
+"WZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZW",  // 4
+"WZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZW",  // 5
+"WZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZW",  // 6
+"W..............................W",  // 7
+"WWWWWWWWWWWWWWWWWWWWWWWWWWWWWW.W",  // 8 通路（右端のみ）
+"WWWWWWWWWWWWWWWWWWWWWWWWWWWWWW.W",  // 9
+"W222222222222222222222222222222W",  // 10 草原1
+"W222222222222222222222222222222W",  // 11
+"W.WWWWWWWWWWWWWWWWWWWWWWWWWWWWWW", // 12 通路（左端のみ）
+"W.WWWWWWWWWWWWWWWWWWWWWWWWWWWWWW", // 13
+"W333333333333333333333333333333W",  // 14 ラブホ街1
+"W333333333333333333333333333333W",  // 15
+"WWWWWWWWWWWWWWWWWWWWWWWWWWWWWW.W",  // 16 通路（右端）
+"WWWWWWWWWWWWWWWWWWWWWWWWWWWWWW.W",  // 17
+"W222222222222222222222222222222W",  // 18 草原2
+"W222222222222222222222222222222W",  // 19
+"W.WWWWWWWWWWWWWWWWWWWWWWWWWWWWWW", // 20
+"W.WWWWWWWWWWWWWWWWWWWWWWWWWWWWWW", // 21
+"W333333333333333333333333333333W",  // 22 ラブホ街2
+"W333333333333333333333333333333W",  // 23
+"WWWWWWWWWWWWWWWWWWWWWWWWWWWWWW.W",  // 24
+"WWWWWWWWWWWWWWWWWWWWWWWWWWWWWW.W",  // 25
+"W222222222222222222222222222222W",  // 26 草原3
+"W222222222222222222222222222222W",  // 27
+"W..............................W",  // 28 城前
+"W555555555555555555555555555555W",  // 29 城床
+"WWWWWWWWWWWWWWWBWWWWWWWWWWWWWWWW",  // 30 ボス門
+"W55555555555555G555555555555555W",  // 31 ゴール
+"WWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWW",  // 32
+];
+const ROWS = M.length;
+const COLS = 32;
+let cam = {x:0, y:0};
+let bossDefeated = false;
+
+// ----- Player -----
+const player = { x:3, y:2, dir:0, hp:40, mhp:40, mp:30, mmp:30, gold:10000, lv:1, exp:0, atk:8, step:0, anim:0, stalked:false, prevX:3, prevY:2, moveT:1, encMul:1.0, photoLabel:"未選択" };
+
+// ----- 写真選択（最初に1回だけ） -----
+const PHOTO_OPTIONS = [
+  {
+    label: "盛り加工写真",
+    desc: "マッチング率MAX。全員、別人として現れる。",
+    flavor: "向こうも盛り、こっちも盛り。会う前から疲れる。",
+    encMul: 2.0,
+    color: "#ff9bd6",
+  },
+  {
+    label: "そこそこ自撮り",
+    desc: "ふつうの量、ふつうの質、ふつうに沼。",
+    flavor: "可もなく、不可もなく、心は減っていきます。",
+    encMul: 1.0,
+    color: "#ffd966",
+  },
+  {
+    label: "飼い猫の写真",
+    desc: "ほぼ誰も来ない。心は最も守られる。",
+    flavor: "勝つために、降りるのも勇気です。",
+    encMul: 0.12,
+    color: "#a0ffa0",
+  },
+];
+let photoSel = 1;
+
+// ----- 物語シーン定義 -----
+const PROLOGUE_SCENES = [
+  {img:"prologue1", caption:"深夜1時。勇者の自宅、ひとり。"},
+  {img:"prologue2", caption:"スマホが、青く光った。マチアプの通知。"},
+  {img:"prologue3", caption:"タップした瞬間、勇者はアプリ世界に吸い込まれる。"},
+  {img:"prologue4", caption:"目の前に広がる、ネオンのマチアプ世界。"},
+  {img:"prologue5", caption:"勇者の冒険が、いま始まる。"},
+];
+const ENDING_TRUE_SCENES = [
+  {img:"ending1", caption:"玉座の奥に、ふつうの子が立っていた。"},
+  {img:"ending2", caption:"二人は、ただ向かい合って話した。"},
+  {img:"ending3", caption:"その日、二人は定食屋で、普通のごはんを食べた。"},
+  {img:"ending4", caption:"勇者はようやく、アプリを閉じることができた。"},
+  {img:"ending5", caption:"朝の通りを、二人で歩いた。"},
+];
+
+// シーンプレイヤー（プロローグ / エンディングで共有）
+let scene = null;
+function startScene(scenes, onDone){
+  scene = { scenes, step: 0, t: 0, canAdvance: false, onDone };
+}
+function tickScene(){
+  if(!scene) return;
+  scene.t++;
+  if(scene.t >= 20) scene.canAdvance = true;
+  // Esc または Backspace でスキップ
+  if(lastKey === "Escape" || lastKey === "Backspace"){
+    lastKey = "";
+    scene.step = scene.scenes.length;
+  }
+  const pressed = (lastKey === "Enter" || lastKey === " ");
+  if(scene.canAdvance && pressed){
+    lastKey = "";
+    scene.step++;
+    scene.t = 0;
+    scene.canAdvance = false;
+    SFX.cmdMove();
+  }
+  if(scene.step >= scene.scenes.length){
+    const cb = scene.onDone;
+    scene = null;
+    if(cb) cb();
+  }
+}
+function drawScene(){
+  if(!scene) return;
+  const W = VIEW_COLS*TS, H = VIEW_ROWS*TS;
+  const cur = scene.scenes[scene.step];
+  ctx.fillStyle = "#000";
+  ctx.fillRect(0, 0, W, H);
+  const img = IMG[cur.img];
+  if(img){
+    // 中央フィットでアスペクト維持
+    const ir = img.width / img.height;
+    const cr = W / H;
+    let dw, dh, dx, dy;
+    if(ir > cr){
+      dw = W;
+      dh = W / ir;
+      dx = 0;
+      dy = (H - dh) / 2;
+    } else {
+      dh = H;
+      dw = H * ir;
+      dx = (W - dw) / 2;
+      dy = 0;
+    }
+    // フェードイン
+    const fade = Math.min(1, scene.t / 18);
+    ctx.globalAlpha = fade;
+    ctx.drawImage(img, dx, dy, dw, dh);
+    ctx.globalAlpha = 1;
+  } else {
+    ctx.fillStyle = "#222";
+    ctx.fillRect(0, 0, W, H);
+    ctx.fillStyle = "#888";
+    ctx.font = "12px 'DotGothic16',monospace";
+    ctx.fillText(`(画像 ${cur.img} 読み込み中)`, 20, 40);
+  }
+  // 下部キャプション
+  const ch = 56;
+  ctx.fillStyle = "rgba(0,0,0,0.78)";
+  ctx.fillRect(0, H-ch, W, ch);
+  ctx.strokeStyle = "#ffd966";
+  ctx.lineWidth = 2;
+  ctx.strokeRect(8, H-ch+6, W-16, ch-12);
+  ctx.fillStyle = "#fff";
+  ctx.font = "15px 'DotGothic16',monospace";
+  const fadeT = Math.min(1, scene.t / 12);
+  ctx.globalAlpha = fadeT;
+  ctx.fillText(cur.caption, 22, H - ch/2 + 6);
+  ctx.globalAlpha = 1;
+  // ▼ Enter で進む
+  if(scene.canAdvance && Math.floor(frame/14)%2===0){
+    ctx.fillStyle = "#ffd966";
+    ctx.font = "bold 14px 'DotGothic16',monospace";
+    ctx.fillText("▼", W - 26, H - 14);
+  }
+  // 進行バー
+  const pct = (scene.step + 1) / scene.scenes.length;
+  ctx.fillStyle = "rgba(255,255,255,0.15)";
+  ctx.fillRect(0, 0, W, 3);
+  ctx.fillStyle = "#ffd966";
+  ctx.fillRect(0, 0, W * pct, 3);
+  // スキップヒント
+  ctx.fillStyle = "rgba(255,255,255,0.4)";
+  ctx.font = "10px 'DotGothic16',monospace";
+  ctx.fillText("Esc でスキップ", W - 100, 14);
+}
+
+// ----- Battle flavor pools (black humor) -----
+const FLAVOR_INTRO = [
+  "プロフ写真と別人。整形か、加工か、AIか。",
+  "現地集合の指定が異様に手慣れている。下見済みだ。",
+  "鞄の中身が、想像より重そうだ。中身は聞かない。",
+  "今日この後の予定が、もう決まっている顔。",
+  "勇者の口座残高を、目で一瞬でスキャンした。",
+  "笑顔の解像度が、加工アプリ並みに高い。",
+  "待ち合わせ場所が、ホテルの真横だった。",
+  "店指定がやけに具体的。常連感がすごい。",
+  "香水とアルコールが、ちょうど良い濃度で混ざる。",
+  "勇者の指輪の有無を、3秒で確認した。",
+];
+const FLAVOR_VIBE = [
+  "周囲を見回している。誰か別の人を探している？",
+  "話題のストックが用意済みだ。多分これで5回目。",
+  "テーブルの下で、誰かにLINEを返している。",
+  "「ふつう」という言葉を3回使った。多すぎる。",
+  "鏡を見る回数より、勇者を見る回数が少ない。",
+  "占いアプリの通知だけは、即既読。",
+  "勇者の身分証を、目で2回スキャンした。",
+  "終電が消える時刻まで、あと3時間。",
+  "「副業」という単語が、すでに3回出てきた。",
+  "メニューを見る前から、ハイボールを頼んでいた。",
+];
+const HERO_INNER = [
+  "勇者「(……目を合わせるのが、なぜか怖い)」",
+  "勇者「(財布の中身、今いくらだっけ)」",
+  "勇者「(これ、引き返した方がいい気がする)」",
+  "勇者「(返信の速度が遅いと、たぶん殺される)」",
+  "勇者「(終電のことを思い出した)」",
+  "勇者「(プロフィール、設定し直そう)」",
+  "勇者「(部屋の鍵、ちゃんとかけてきたっけ)」",
+  "勇者「(なぜ自分は今、ここにいるんだ)」",
+];
+const HERO_REACT = [
+  "勇者「(うわ……心が削れた音がした)」",
+  "勇者「(これは……課金ガチャより痛い)」",
+  "勇者「(LINEブロックの予感が背中を走る)」",
+  "勇者「(今夜は眠れない予感がする)」",
+  "勇者「(自尊心、また一段下がった)」",
+  "勇者「(あの一言、夜中3時に思い出す奴だ)」",
+  "勇者「(明日の出勤、休もうかな)」",
+];
+const HERO_WIN = [
+  "勇者「(……無事に帰れる。今日は奇跡だ)」",
+  "勇者「(プロフィール写真の構図を、ひとつ覚えた)」",
+  "勇者「(今夜はもう、アプリを閉じよう)」",
+  "勇者「(自宅までの電車賃を、もう一度確認した)」",
+  "勇者「(誰にも会わずに、布団に直行したい)」",
+];
+// レベルアップ時の内なる成長セリフ（2枠に分けて重複回避）
+const HERO_GROWTH_A = [
+  "勇者「(少しだけ大人の男に近づいた気がする……)」",
+  "勇者「(また一つ、人を見る目を覚えた)」",
+  "勇者「(自分の余裕が、自分を守ると気づいた)」",
+  "勇者「(独りで居る勇気が、また少し増えた)」",
+  "勇者「(優しさと弱さは、別物だと知った)」",
+  "勇者「(逃げ足の速さも、男の強さだと学んだ)」",
+];
+// ラブホ街（沼）で踏むネガティブイベント。
+// 足跡1種＋既読スルー1種＋ブロック5種＝計7種。
+const SWAMP_EVENTS = [
+  "👣 足跡が届きました",
+  "📭 既読スルーされました",
+  "🚫 ブロックされました（理由不明）",
+  "🚫 ブロックされました（写真が違うらしい）",
+  "🚫 ブロックされました（年齢で）",
+  "🚫 ブロックされました（即・3秒で）",
+  "🚫 ブロックされました（無言で）",
+];
+
+const HERO_GROWTH_B = [
+  "勇者「(プロフィール写真の見方が、変わった気がする)」",
+  "勇者「(他人の地雷の踏み方を、また一つ覚えた)」",
+  "勇者「(疲れた顔の方が、信用できると気づいた)」",
+  "勇者「(明日は、いいねを返す前に深呼吸しよう)」",
+  "勇者「(出会わない選択肢の重みを、知った)」",
+  "勇者「(財布の薄さと、心の薄さは比例しない)」",
+];
+
+// ----- Enemies -----
+// sprite: sprite-sheet key in IMG, col/row for cell within sheet (4x2)
+// special: { invincible: 全攻撃無効 / stalker: 倒すとストーカー化 / metal: 高逃走率 }
+const ENEMIES = [
+  {
+    id:"troll", name:"トロール系女子", sprite:"troll", col:0, row:0, color:"#9a5",
+    hp:18, atk:6, gold:60, exp:2,
+    lines:["店指定しといたから。","予算いくら？","写真と違うとか言わないでね。"],
+    on_talk:{mp:-6, msg:"なぜか査定された。"},
+    on_treat:{gold:-1800, hp:0, mp:1, msg:"会計だけスムーズに進んだ。"},
+    attacks:[
+      {label:"店指定された", hp:0, mp:1.0},
+      {label:"予算を聞かれた", hp:0, mp:1.2},
+      {label:"無言で見られた", hp:0.3, mp:0.7},
+    ],
+  },
+  {
+    id:"succ", name:"ワンナイ系サキュバス", sprite:"succ", col:0, row:0, color:"#e57",
+    hp:22, atk:8, gold:80, exp:3,
+    lines:["真剣な人だけって書いてるよ♡","もう一軒行こ？","ホテル近いとこ知ってる。"],
+    on_talk:{mp:-4, hp:-2, msg:"耐えた。謎の敗北感。"},
+    on_treat:{gold:-2200, hp:-3, mp:-5, msg:"財布と理性が同時に削れた。"},
+    attacks:[
+      {label:"甘く誘惑された", hp:0.4, mp:0.8},
+      {label:"距離を詰められた", hp:0.6, mp:0.4},
+      {label:"ホテル代を要求された", hp:0.2, mp:1.0},
+    ],
+  },
+  {
+    id:"kakou", name:"加工トロール", sprite:"kakou", col:0, row:0, color:"#aa6",
+    hp:20, atk:5, gold:50, exp:2,
+    lines:["奇跡の一枚しか撮らない。","現地集合でいい？","加工とは創作です。"],
+    on_talk:{mp:-8, msg:"現実から目をそらした。メンタルにきた。"},
+    on_treat:{gold:-2500, mp:-2, msg:"ただの食事イベントになった。"},
+    attacks:[
+      {label:"気分を害した、通報された", hp:0.2, mp:1.4},
+      {label:"加工がバレた話に激怒", hp:0.5, mp:0.8},
+      {label:"急に挙動不審", hp:0.1, mp:1.2},
+    ],
+  },
+  {
+    id:"papa", name:"パパ活見習い", sprite:"papa", col:0, row:0, color:"#d8a",
+    hp:24, atk:7, gold:0, exp:3,
+    lines:["顔合わせ2、お茶3でよろ。","タクシー代も別ね。","条件いい人他にいるんだ。"],
+    on_talk:{mp:-5, msg:"条件交渉で疲弊した。"},
+    on_treat:{gold:-3000, mp:1, msg:"金で平和は買えた。"},
+    attacks:[
+      {label:"条件交渉でゴリ押し", hp:0.4, mp:1.0},
+      {label:"タクシー代を請求された", hp:0.3, mp:0.7},
+      {label:"他にもっといい人がいる宣言", hp:0.1, mp:1.3},
+    ],
+  },
+  // --- メタル枠：高exp、逃走率高、HPは低めだが命中もしにくい ---
+  {
+    id:"metal", name:"食い逃げメタル", sprite:"metal", col:0, row:0, color:"#bbb",
+    hp:8, atk:3, gold:400, exp:14,
+    lines:["お会計お先〜！","ごちそうさま♡","タクシー呼んでくれた？(走り去る)"],
+    on_talk:{mp:-2, msg:"消えてた。"},
+    on_treat:{gold:-2500, mp:-3, msg:"飯だけ食って消えた。"},
+    attacks:[
+      {label:"伝票だけ残された", hp:0, mp:1.0},
+      {label:"トイレから帰ってこない", hp:0.2, mp:1.0},
+    ],
+    flee:0.55,   // 自分から逃げる確率（毎ターン）
+  },
+  // --- 当て馬ゴースト：本命がほかにいる。全攻撃無効。倒せない。逃げるしかない ---
+  {
+    id:"ghost", name:"当て馬ゴースト", sprite:"ghost", col:0, row:0, color:"#bcf",
+    hp:999, atk:4, gold:0, exp:0,
+    lines:["えー私、本命が別にいてさ。","当て馬としては優秀でしょ？","リアクションだけ欲しい。"],
+    on_talk:{mp:-4, msg:"心が乾いた音をたてた。"},
+    on_treat:{gold:-1500, mp:-3, msg:"奢っても進展なし。"},
+    attacks:[
+      {label:"本命の話を聞かされた", hp:0, mp:1.2},
+      {label:"既読スルーされた", hp:0, mp:1.0},
+    ],
+    invincible:true,
+  },
+  // --- 爆弾岩：倒したらストーカー化。逃げた方が安全 ---
+  {
+    id:"bomb", name:"爆弾岩おんな", sprite:"bomb", col:0, row:0, color:"#c64",
+    hp:30, atk:6, gold:200, exp:5,
+    lines:["LINEの返信、何分以内？","今どこいるの？","誰と？写真送って？"],
+    on_talk:{mp:-6, msg:"質問攻めにあった。"},
+    on_treat:{gold:-2200, mp:-4, msg:"次の店も決まった。決まってしまった。"},
+    attacks:[
+      {label:"5分でLINE既読催促", hp:0.2, mp:1.2},
+      {label:"位置情報を要求された", hp:0.4, mp:1.0},
+    ],
+    stalker:true,
+  },
+  // --- あるある追加6種 ---
+  {
+    id:"mondai", name:"質問魔オンナ", sprite:"troll", col:2, row:0, color:"#c8c",
+    tint:"rgba(180,80,200,0.3)",
+    hp:16, atk:4, gold:30, exp:2,
+    lines:["年収いくら？","身長は？","体重は？参考までに。","彼女いた期間は？"],
+    on_talk:{mp:-5, msg:"履歴書めくられた気分。"},
+    on_treat:{gold:-1200, mp:-2, msg:"領収書もくださいねって。"},
+    attacks:[
+      {label:"年収を聞かれた", hp:0, mp:1.1},
+      {label:"身長サバ読み疑惑", hp:0.1, mp:1.0},
+      {label:"前カノの数を質問された", hp:0, mp:1.3},
+    ],
+  },
+  {
+    id:"multi", name:"マルチ勧誘ちゃん", sprite:"papa", col:2, row:0, color:"#fc4",
+    tint:"rgba(255,200,80,0.4)",
+    hp:22, atk:6, gold:0, exp:3,
+    lines:["副業に興味ない？","月収7桁も夢じゃないよ。","今度セミナー一緒に行こ？","上の人紹介する♡"],
+    on_talk:{mp:-6, msg:"成功者のマインドセット話を聞かされた。"},
+    on_treat:{gold:-3500, mp:-5, msg:"教材を売りつけられた。"},
+    attacks:[
+      {label:"自由になりたくない？と聞かれた", hp:0, mp:1.3},
+      {label:"上の人と会わせると言われた", hp:0.1, mp:1.1},
+      {label:"夢の話を1時間された", hp:0.3, mp:1.0},
+    ],
+  },
+  {
+    id:"uranai", name:"占い狂いガール", sprite:"succ", col:2, row:0, color:"#9bf",
+    tint:"rgba(140,180,255,0.4)",
+    hp:18, atk:5, gold:40, exp:3,
+    lines:["水星逆行だから今日は会えない。","あなた魂が古い人かも♡","前世の話していい？","今日は六白金星だから無理"],
+    on_talk:{mp:-7, msg:"前世の因縁を解説された。"},
+    on_treat:{gold:-2800, mp:-3, msg:"次は良い日取りでね、と言われた。"},
+    attacks:[
+      {label:"魂のレベルが違う、と告げられた", hp:0, mp:1.2},
+      {label:"水星逆行で会えないと宣言", hp:0, mp:1.1},
+      {label:"前世が敵だったと判明", hp:0.2, mp:1.0},
+    ],
+  },
+  {
+    id:"kekkon", name:"既婚バレ女", sprite:"kakou", col:2, row:0, color:"#cc6",
+    tint:"rgba(255,220,80,0.35)",
+    hp:24, atk:7, gold:0, exp:4,
+    lines:["指輪？日焼けの跡。","旦那？いない、いない。","家に帰りたくないだけ。","車？社用車。"],
+    on_talk:{mp:-6, msg:"色々な矛盾が見えてきた。"},
+    on_treat:{gold:-3000, mp:-4, msg:"家庭のグチを浴びせられた。"},
+    attacks:[
+      {label:"指輪のタンラインが見えた", hp:0, mp:1.4},
+      {label:"旦那からLINEが来た", hp:0.1, mp:1.3},
+      {label:"21時で帰宅時間と言われた", hp:0, mp:1.2},
+    ],
+  },
+  {
+    id:"menhera", name:"メンヘラ依存", sprite:"succ", col:3, row:0, color:"#f6a",
+    tint:"rgba(255,100,180,0.45)",
+    hp:26, atk:6, gold:50, exp:4,
+    lines:["今すぐ来てくれないと無理。","返事遅いね。私のこと嫌い？","死にたい。今すぐ電話。","他の女とLINEしてるでしょ。"],
+    on_talk:{mp:-8, msg:"深夜の電話が約束された。"},
+    on_treat:{gold:-2000, mp:-6, msg:"プレゼントなのに浮気の証拠扱い。"},
+    attacks:[
+      {label:"深夜3時にLINE100通", hp:0.1, mp:1.5},
+      {label:"既読つけたのに返信なし攻撃", hp:0, mp:1.4},
+      {label:"位置情報共有を強要", hp:0.2, mp:1.3},
+    ],
+  },
+  {
+    id:"mount", name:"マウント女", sprite:"papa", col:3, row:0, color:"#9c9",
+    tint:"rgba(120,220,160,0.35)",
+    hp:20, atk:5, gold:60, exp:3,
+    lines:["私はそれ知ってる、もう古い。","えーまだそれ食べてるの？","元カレ◯◯系だったから。","フランスだとそうじゃないけど。"],
+    on_talk:{mp:-6, msg:"知識量で殴られた。"},
+    on_treat:{gold:-2500, mp:-3, msg:"店のチョイスが浅いと言われた。"},
+    attacks:[
+      {label:"私もっと良い人と…の比較", hp:0, mp:1.3},
+      {label:"知識マウントの嵐", hp:0.1, mp:1.2},
+      {label:"元カレ自慢が始まった", hp:0, mp:1.4},
+    ],
+  },
+];
+
+// タイルごとの敵プール
+const ENEMIES_BY_TILE = {
+  "2": ["troll","kakou","mondai","uranai","mount","metal","ghost"],     // 草原：軽め＋レア
+  "3": ["succ","papa","multi","kekkon","menhera","bomb"],                // ホテル街：濃いめ
+};
+function pickEnemy(t){
+  const pool = ENEMIES_BY_TILE[t] || ENEMIES.map(e=>e.id);
+  for(let i=0;i<5;i++){
+    const id = pick(pool);
+    const e = ENEMIES.find(x=>x.id===id);
+    if(e) return e;
+  }
+  return ENEMIES[0];
+}
+
+// ボス：死神（永遠に近づけない、仲良くなったらね）
+const BOSS = {
+  id:"shinigami", name:"死神（永遠に近づけない）", sprite:"queen", col:0, row:0, color:"#c8a",
+  hp:80, atk:10, gold:0, exp:20,
+  lines:[
+    "仲良くなったらね。",
+    "私のこと、まだ何にも知らないでしょ。",
+    "そういう人、いっぱい見てきた。",
+    "もう少し、ちゃんと話そうよ。",
+  ],
+  on_talk:{mp:-2, msg:"距離が少し縮まった気がする。"},
+  on_treat:{gold:-3000, mp:-2, msg:"奢られると、ちょっとだけ笑った。"},
+  attacks:[
+    {label:"はぐらかされた", hp:0.2, mp:1.2},
+    {label:"既読が止まった", hp:0.3, mp:1.0},
+    {label:"距離を置かれた", hp:0.4, mp:0.9},
+    {label:"「仲良くなったらね」", hp:0.1, mp:1.4},
+  ],
+  intimacyMode:true,  // 親密度が3以上ないと攻撃が0になる
+};
+
+// ----- Game state -----
+let mode = (location.hash==="#world")?"world":(location.hash==="#battle")?"battle":(location.hash==="#end")?"ending":(location.hash==="#photo")?"photoSelect":(location.hash==="#prologue")?"prologueScene":(location.hash==="#trueend")?"endingScene":(location.hash==="#go")?"gameover":"title";
+if(location.hash==="#prologue") setTimeout(()=>startScene(PROLOGUE_SCENES, ()=>{ mode="photoSelect"; }), 50);
+if(location.hash==="#trueend") setTimeout(()=>startScene(ENDING_TRUE_SCENES, ()=>{ ending="true"; mode="ending"; }), 50);
+if(location.hash==="#boss"){ player.x=15; player.y=29; mode="world"; bossDefeated=false; }
+if(location.hash==="#goal"){ player.x=14; player.y=31; mode="world"; bossDefeated=true; setTile(15,30,"5"); }
+if(location.hash==="#shinigami"){
+  setTimeout(()=>startBattle(true), 100);
+  mode="world";
+}
+let msgQueue = [];
+let battle = null;
+let ending = null;
+let frame = 0;
+let worldPopups = [];
+
+// ----- Input -----
+const keys = {};
+let lastKey = "";
+
+addEventListener("keydown", e=>{
+  keys[e.key]=true;
+  lastKey=e.key;
+  if(["ArrowUp","ArrowDown","ArrowLeft","ArrowRight","Enter"," "].includes(e.key)) e.preventDefault();
+});
+addEventListener("keyup", e=>{keys[e.key]=false;});
+
+// soft-pad
+document.querySelectorAll("#pad button").forEach(b=>{
+  const k = b.dataset.k;
+  if(!k) return;
+  const press = ()=>{keys[k]=true; lastKey=k;};
+  const rel = ()=>{keys[k]=false;};
+  b.addEventListener("pointerdown", e=>{e.preventDefault();press();});
+  b.addEventListener("pointerup", rel);
+  b.addEventListener("pointerleave", rel);
+});
+
+// ----- Helpers -----
+function tile(x,y){ if(y<0||y>=M.length) return "W"; const r=M[y]; if(x<0||x>=r.length) return "W"; return r[x]; }
+function walkable(t){ return t==="."||t==="H"||t==="2"||t==="3"||t==="4"||t==="5"||t==="B"||t==="7"||t==="G"||t==="Z"; }
+function setTile(x,y,c){
+  const r=M[y]; if(!r) return;
+  M[y] = r.substring(0,x) + c + r.substring(x+1);
+}
+function rand(n){ return Math.floor(Math.random()*n); }
+function pick(arr){ return arr[rand(arr.length)]; }
+function clamp(v,lo,hi){ return Math.max(lo,Math.min(hi,v)); }
+
+// ----- Status HUD -----
+function refreshHUD(){
+  document.getElementById("hp").textContent   = "❤️ HP "+player.hp+"/"+player.mhp;
+  document.getElementById("lv").textContent   = "⭐ Lv."+player.lv;
+  document.getElementById("gold").textContent = "💰 "+player.gold+"円";
+}
+
+// ----- Drawing primitives -----
+// Tile sheet (4x2):
+// 0: blue grid wall   1: heart-grass (草)  2: love-hotel    3: brick (city)
+// 4: lockers          5: house             6: throne        7: portal
+const TILE_MAP = {
+  "W": 0,  // wall
+  "H": 5,  // home
+  "2": 1,  // grass
+  "3": 2,  // hotel
+  "5": 3,  // castle floor (brick)
+  "B": 6,  // throne (boss)
+  "G": 7,  // portal (普通の子)
+};
+function drawTile(vx,vy,t){
+  const px=vx*TS, py=vy*TS;
+  // 床（.）と登録ボーナス（Z）は専用描画で壁と差をつける
+  if(t === "."){
+    ctx.fillStyle = "#08081a";
+    ctx.fillRect(px,py,TS,TS);
+    ctx.fillStyle = "#10102a";
+    ctx.fillRect(px+1,py+TS-2,TS-2,1);
+    ctx.fillRect(px+TS-2,py+1,1,TS-2);
+    return;
+  }
+  if(t === "Z"){
+    // 登録ボーナスいいね畑（金色のキラキラ）
+    ctx.fillStyle = "#3a2a08";
+    ctx.fillRect(px,py,TS,TS);
+    ctx.fillStyle = "#8a6a18";
+    ctx.fillRect(px+1,py+1,TS-2,TS-2);
+    const sparkle = 0.4 + 0.4*Math.sin(frame*0.12 + (vx*7+vy*3));
+    ctx.fillStyle = `rgba(255,230,120,${sparkle})`;
+    ctx.fillRect(px+2,py+2,TS-4,TS-4);
+    // small heart icon
+    ctx.fillStyle = "#ffd966";
+    ctx.font = "bold 10px sans-serif";
+    ctx.fillText("♥", px+TS/2-4, py+TS/2+5);
+    return;
+  }
+  const idx = TILE_MAP[t];
+  if(idx === undefined){
+    ctx.fillStyle="#0e0e22"; ctx.fillRect(px,py,TS,TS);
+    return;
+  }
+  const cell = tileCell(idx);
+  if(cell){
+    drawSprite(cell, px, py, TS, TS);
+    if(t==="G"){
+      const pulse = 0.5 + 0.5*Math.sin(frame*0.08);
+      ctx.fillStyle = `rgba(255,220,180,${0.15 + 0.15*pulse})`;
+      ctx.fillRect(px,py,TS,TS);
+    }
+  } else {
+    const fallback = {"W":"#3a3a6e","H":"#e8c46a","2":"#a0407a","3":"#660066","5":"#7a5a1a","B":"#c4a020","G":"#ffd0c0"};
+    ctx.fillStyle = fallback[t] || "#0e0e22";
+    ctx.fillRect(px,py,TS,TS);
+  }
+}
+
+function playerVX(){ return player.prevX + (player.x - player.prevX) * player.moveT; }
+function playerVY(){ return player.prevY + (player.y - player.prevY) * player.moveT; }
+
+function updateCam(){
+  // center on (visual) player, clamp to world
+  const px = playerVX(), py = playerVY();
+  let cx = px - (VIEW_COLS>>1) + 0.5;
+  let cy = py - (VIEW_ROWS>>1) + 0.5;
+  cam.x = clamp(cx, 0, COLS - VIEW_COLS);
+  cam.y = clamp(cy, 0, ROWS - VIEW_ROWS);
+}
+
+function drawMap(){
+  // cam may be fractional (smooth scroll); floor for tile lookup, use fractional remainder for sub-pixel render
+  const camTx = Math.floor(cam.x);
+  const camTy = Math.floor(cam.y);
+  const subX = Math.floor((cam.x - camTx) * TS);
+  const subY = Math.floor((cam.y - camTy) * TS);
+  for(let vy=-1; vy<=VIEW_ROWS; vy++){
+    for(let vx=-1; vx<=VIEW_COLS; vx++){
+      drawTileAt(vx*TS - subX, vy*TS - subY, tile(camTx+vx, camTy+vy));
+    }
+  }
+}
+function drawTileAt(px, py, t){
+  if(t === "."){
+    ctx.fillStyle = "#08081a"; ctx.fillRect(px,py,TS,TS);
+    ctx.fillStyle = "#10102a";
+    ctx.fillRect(px+1,py+TS-2,TS-2,1);
+    ctx.fillRect(px+TS-2,py+1,1,TS-2);
+    return;
+  }
+  if(t === "Z"){
+    ctx.fillStyle = "#3a2a08"; ctx.fillRect(px,py,TS,TS);
+    ctx.fillStyle = "#8a6a18"; ctx.fillRect(px+1,py+1,TS-2,TS-2);
+    const sparkle = 0.4 + 0.4*Math.sin(frame*0.12 + (px*0.3+py*0.2));
+    ctx.fillStyle = `rgba(255,230,120,${sparkle})`;
+    ctx.fillRect(px+2,py+2,TS-4,TS-4);
+    ctx.fillStyle = "#ffd966";
+    ctx.font = "bold 10px sans-serif";
+    ctx.fillText("♥", px+TS/2-4, py+TS/2+5);
+    return;
+  }
+  const idx = TILE_MAP[t];
+  if(idx === undefined){
+    ctx.fillStyle="#08081a"; ctx.fillRect(px,py,TS,TS);
+    return;
+  }
+  const cell = tileCell(idx);
+  if(cell){
+    drawSprite(cell, px, py, TS, TS);
+    if(t==="G"){
+      const pulse = 0.5 + 0.5*Math.sin(frame*0.08);
+      ctx.fillStyle = `rgba(255,220,180,${0.15 + 0.15*pulse})`;
+      ctx.fillRect(px,py,TS,TS);
+      // 普通の子のNPCスプライトもタイル上に描画
+      if(IMG.futsuu){
+        const cw = IMG.futsuu.width/4, ch = IMG.futsuu.height/2;
+        ctx.drawImage(IMG.futsuu, 0, 0, cw, ch, px, py, TS, TS);
+      }
+    }
+  } else {
+    const fallback = {"W":"#3a3a6e","H":"#e8c46a","2":"#a0407a","3":"#660066","5":"#7a5a1a","B":"#c4a020","G":"#ffd0c0"};
+    ctx.fillStyle = fallback[t] || "#08081a";
+    ctx.fillRect(px,py,TS,TS);
+  }
+}
+
+function drawPlayer(){
+  const vx = playerVX(), vy = playerVY();
+  const px = Math.floor((vx - cam.x) * TS);
+  const py = Math.floor((vy - cam.y) * TS);
+  // shadow
+  ctx.fillStyle="rgba(0,0,0,0.45)";
+  ctx.beginPath(); ctx.ellipse(px+TS/2, py+TS-1, TS/2-2, 3, 0, 0, Math.PI*2); ctx.fill();
+  // bigger walk bounce while sliding
+  const walking = player.moveT < 1;
+  const bob = walking ? Math.floor(Math.sin(player.moveT * Math.PI) * -3) : 0;
+  // Hero sprite: row0 = down/up frames, row1 = left/right frames
+  const frameIdx = walking
+    ? (player.moveT < 0.5 ? 0 : 1)
+    : (Math.floor(frame/20)%2);
+  let col=0, row=0;
+  if(player.dir===0){ col=frameIdx; row=0; }
+  else if(player.dir===1){ col=2+frameIdx; row=0; }
+  else if(player.dir===2){ col=frameIdx; row=1; }
+  else { col=2+frameIdx; row=1; }
+  const cell = spriteCell(IMG.hero, col, row);
+  if(!drawSprite(cell, px, py+bob, TS, TS)){
+    ctx.fillStyle="#e8c46a"; ctx.fillRect(px+6, py+4, TS-12, 6);
+    ctx.fillStyle="#3a8aff"; ctx.fillRect(px+5, py+13, TS-10, 7);
+  }
+  // footstep dust while sliding
+  if(walking && player.moveT > 0.3 && player.moveT < 0.8 && frame%2===0){
+    ctx.fillStyle = "rgba(180,180,200,0.5)";
+    ctx.fillRect(px + 4 + rand(4), py + TS - 4, 2, 2);
+    ctx.fillRect(px + TS - 8 + rand(4), py + TS - 4, 2, 2);
+  }
+  if(player.stalked){
+    ctx.fillStyle = `rgba(255,80,80,${0.4+0.3*Math.sin(frame*0.2)})`;
+    ctx.fillRect(px-1, py-2, TS+2, 2);
+  }
+}
+
+function drawWorld(){
+  updateCam();
+  drawMap();
+  drawPlayer();
+  // world popups (like +1いいね)
+  for(let i=worldPopups.length-1; i>=0; i--){
+    const p = worldPopups[i];
+    const yoff = (30 - p.t)*0.6;
+    const alpha = Math.min(1, p.t/15);
+    ctx.fillStyle = p.color;
+    ctx.globalAlpha = alpha;
+    ctx.font = "bold 11px 'DotGothic16',monospace";
+    ctx.fillText(p.text, p.x, p.y - yoff);
+    ctx.globalAlpha = 1;
+    p.t--;
+    if(p.t<=0) worldPopups.splice(i,1);
+  }
+  // top label
+  ctx.fillStyle="rgba(0,0,0,0.7)";
+  ctx.fillRect(0,0,VIEW_COLS*TS,18);
+  ctx.fillStyle="#ffd966";
+  ctx.font="12px 'DotGothic16',monospace";
+  let zone = "アプリ起動中…";
+  const t = tile(player.x, player.y);
+  if(t==="H") zone="🏠 自宅・深夜1時";
+  else if(t==="2") zone="📱 マッチング街道（いいね草原）";
+  else if(t==="3") zone="🏨 ラブホ街（強敵出現）";
+  else if(t==="5") zone="🏰 運営本社・最上階";
+  else if(bossDefeated) zone="🌸 静寂の中庭";
+  else zone="📱 アプリ世界";
+  ctx.fillText(zone, 6, 13);
+}
+
+// ----- Window / Message -----
+function drawWindow(x,y,w,h){
+  ctx.fillStyle="#000";
+  ctx.fillRect(x,y,w,h);
+  ctx.strokeStyle="#fff";
+  ctx.lineWidth=2;
+  ctx.strokeRect(x+2,y+2,w-4,h-4);
+  ctx.strokeStyle="#fff";
+  ctx.lineWidth=1;
+  ctx.strokeRect(x+5,y+5,w-10,h-10);
+}
+
+function drawText(lines, x, y){
+  ctx.fillStyle="#fff";
+  ctx.font="14px 'DotGothic16',monospace";
+  lines.forEach((l,i)=>{
+    ctx.fillText(l, x, y + i*20);
+  });
+}
+
+// ----- Encounter logic -----
+function maybeEncounter(){
+  const t = tile(player.x, player.y);
+  const mul = player.encMul || 1.0;
+  if(t==="2"){
+    if(Math.random() < 0.025 * mul) startBattle(false, t);
+  } else if(t==="3"){
+    if(Math.random() < 0.045 * mul) startBattle(false, t);
+  } else if(t==="B"){
+    startBattle(true);
+  } else if(t==="G"){
+    startMeetup();
+  }
+}
+
+// ----- 普通の子との掛け合い → 真エンド -----
+const MEETUP_LINES = [
+  {who:"普通の子", color:"#ffd0c0", text:"あ。ここまで来てくれたんですね。"},
+  {who:"勇者",     color:"#a0f0ff", text:"……はい。色々ありました。"},
+  {who:"普通の子", color:"#ffd0c0", text:"アプリで会った人、変な人いました？"},
+  {who:"勇者",     color:"#a0f0ff", text:"(……脳裏によぎる、加工バリ盛りの顔たち)"},
+  {who:"勇者",     color:"#a0f0ff", text:"……全員、変な人でした。"},
+  {who:"普通の子", color:"#ffd0c0", text:"ですよね〜。私も大変で……。"},
+  {who:"勇者",     color:"#a0f0ff", text:"あなたも？"},
+  {who:"普通の子", color:"#ffd0c0", text:"条件聞いてくる人、占いの話、副業勧誘……。"},
+  {who:"普通の子", color:"#ffd0c0", text:"あと、ブロックの理由が「無言で」とか。"},
+  {who:"勇者",     color:"#a0f0ff", text:"じゃあ、お互い、生き残った者同士ですね。"},
+  {who:"普通の子", color:"#ffd0c0", text:"そうですね。今日、普通にごはん行きませんか？"},
+  {who:"勇者",     color:"#a0f0ff", text:"(……アプリ、もう閉じていいかな)"},
+];
+let meetup = null;
+function startMeetup(){
+  meetup = { step:0, t:0, canAdvance:false };
+  mode = "meetup";
+  SFX.happyChime();
+  setBGM("happy");
+}
+function tickMeetup(){
+  meetup.t++;
+  if(meetup.t >= 18) meetup.canAdvance = true;
+  const pressed = (lastKey==="Enter" || lastKey===" ");
+  if(meetup.canAdvance && pressed){
+    lastKey = "";
+    meetup.step++;
+    meetup.t = 0;
+    meetup.canAdvance = false;
+    SFX.cmdMove();
+    if(meetup.step >= MEETUP_LINES.length){
+      ending = "true";
+      mode = "ending";
+      meetup = null;
+    }
+  }
+}
+function drawMeetup(){
+  const W = VIEW_COLS*TS, H = VIEW_ROWS*TS;
+  // 世界マップを背景に残す
+  drawWorld();
+  // 中央上に二人の名前を控えめに（スプライトは省略、文字会話メイン）
+  ctx.fillStyle = "rgba(0,0,0,0.55)";
+  ctx.fillRect(0, 40, W, 36);
+  ctx.fillStyle = "#ffd966";
+  ctx.font = "bold 14px 'DotGothic16',monospace";
+  ctx.fillText("🌸 玉座の奥、ふつうの空気が流れている", 30, 62);
+
+  // ダイアログウィンドウ
+  const wy = H - 130, wh = 110;
+  drawWindow(8, wy, W-16, wh);
+  const cur = MEETUP_LINES[meetup.step];
+  // 話者ラベル
+  ctx.fillStyle = cur.color;
+  ctx.font = "bold 14px 'DotGothic16',monospace";
+  ctx.fillText(`▼ ${cur.who}`, 24, wy + 24);
+  // 本文
+  ctx.fillStyle = "#fff";
+  ctx.font = "15px 'DotGothic16',monospace";
+  ctx.fillText(cur.text, 24, wy + 56);
+  // 進行ヒント
+  if(meetup.canAdvance && Math.floor(frame/14)%2 === 0){
+    ctx.fillStyle = "#ffd966";
+    ctx.font = "bold 14px 'DotGothic16',monospace";
+    ctx.fillText("▼", W - 32, wy + wh - 12);
+  }
+  // 残量バー（あとどれくらいか）
+  const pct = (meetup.step + 1) / MEETUP_LINES.length;
+  ctx.fillStyle = "rgba(255,255,255,0.15)";
+  ctx.fillRect(8, wy-6, W-16, 3);
+  ctx.fillStyle = "#ffd0c0";
+  ctx.fillRect(8, wy-6, (W-16) * pct, 3);
+}
+
+// ----- Battle -----
+function startBattle(isBoss, tileType){
+  const e = isBoss ? BOSS : pickEnemy(tileType);
+  // 出現時：3倍ボリュームのフレーバー文章
+  let intro;
+  if(isBoss){
+    intro = [
+      `${e.name} があらわれた！`,
+      "笑顔は完璧。距離は1mmも縮まる気配がない。",
+      "「仲良くなったらね」が、札のように手元にある。",
+    ];
+  } else {
+    intro = [
+      `${e.name} があらわれた！`,
+      pick(FLAVOR_INTRO),
+      pick(FLAVOR_VIBE),
+    ];
+  }
+  battle = {
+    enemy: JSON.parse(JSON.stringify(e)),
+    enemyMaxHp: e.hp,
+    isBoss,
+    msg: intro,
+    phase:"enemyTalk",
+    sel:0,
+    flash:0,
+    intimacy: 0,
+    shake:0,
+    popups:[],
+    _resultTimer: 0,
+    _canAdvance: false,
+    _introShown: false,
+  };
+  mode = "battle";
+  if(isBoss){ SFX.bossEnter(); setBGM("boss"); }
+  else { SFX.encounter(); setBGM("battle"); }
+}
+
+// プレイヤーが敵に与えるダメージ計算（撮って通報用）
+function playerAttackDmg(){
+  return player.atk + player.lv*3 + rand(10) + 3;
+}
+
+// 当て馬ゴーストの無敵 / 死神の親密度を判定して、攻撃が通るか
+function attackPasses(e, b){
+  if(e.invincible) return false;
+  if(e.intimacyMode && (b.intimacy||0) < 3) return false;
+  return true;
+}
+
+// 口説き失敗時のあるある反応（必ずHPダメージ）
+const KUDOKU_DODGE = [
+  "ひらりと交わされた。",
+  "ぬるりと話題を濁された。",
+  "「えーやめてよ〜w」で流された。",
+  "急にトイレに立たれた。",
+  "話を別の人の話にすり替えられた。",
+  "「もう少し知ってからね♡」で逃げられた。",
+  "既読がついて返事が止まった。",
+  "「優しいんだね〜」だけで終わった。",
+];
+
+const CMDS = [
+  {label:"💋 口説く", run:(e,b)=>{
+    if(e.intimacyMode){
+      b.intimacy = (b.intimacy||0) + 1;
+      const msg = e.on_talk.msg;
+      if(b.intimacy >= 3){
+        SFX.intimacyUp();
+        return ["勇者は誠実に向き合った。", msg, "「…少しだけ、信じてみる。」", `親密度 ${b.intimacy}/3 ✨通報が通る！`];
+      }
+      SFX.cmdMove();
+      return ["勇者は誠実に向き合った。", msg, `親密度 ${b.intimacy}/3`];
+    }
+    const dodge = pick(KUDOKU_DODGE);
+    // 通常敵は基本口説けない。10%だけ通る
+    if(Math.random() < 0.10 && !e.invincible){
+      const dmg = 3 + rand(3);
+      enemyHurt(e, dmg);
+      return ["奇跡的に響いた！", `${e.name} は少しだけ動揺した。 ${dmg}ダメージ`];
+    }
+    // 失敗 → 自爆ダメージ（HP）
+    const back = 3 + rand(3);
+    player.hp = clamp(player.hp - back, 0, player.mhp);
+    pushPopup(`HP-${back}`, "#ff8080", "player");
+    SFX.miss();
+    return ["勇者「もしよかったら……」", dodge, `HP-${back} のダメージ！`];
+  }},
+  {label:"🍽️ おごる（HP回復）", run:(e,b)=>{
+    const d = e.on_treat;
+    const cost = Math.abs(d.gold||0) || 1500;
+    if(player.gold < cost) return [`所持金が足りない（${cost}円）`];
+    player.gold -= cost;
+    // 一緒にメシ＝HP回復（×2）
+    const heal = Math.floor(player.mhp * 0.8) + rand(12);
+    const dhp = Math.min(player.mhp - player.hp, heal);
+    player.hp += dhp;
+    pushPopup(`HP+${dhp}`, "#80ff80", "player");
+    SFX.bonus();
+    if(e.intimacyMode){
+      b.intimacy = (b.intimacy||0) + 2;
+      SFX.intimacyUp();
+      if(b.intimacy >= 3){
+        return [`${cost}円 で一緒に食事した。`, `HP+${dhp}回復！`, `親密度 ${b.intimacy}/3 ✨通報が通る！`];
+      }
+      return [`${cost}円 で一緒に食事した。`, `HP+${dhp}回復！`, `親密度 ${b.intimacy}/3`];
+    }
+    if(e.invincible){
+      return [`${cost}円 で食事に誘った。`, "けど本命の話を聞かされた。", `HP+${dhp}（飯はうまかった）`];
+    }
+    // 食事中に印象UP＝敵HPも少し削れる
+    enemyHurt(e, 4 + rand(4));
+    return [`${cost}円 で一緒に食事した。`, `HP+${dhp}回復！`, "敵も少し満足げ。"];
+  }},
+  {label:"📸 撮って通報", run:(e,b)=>{
+    if(e.invincible){
+      SFX.miss();
+      return ["スクショは撮った。", "けど本命がほかにいる。", "通報は届かなかった。"];
+    }
+    if(e.intimacyMode && (b.intimacy||0) < 3){
+      SFX.miss();
+      return ["通報しようとした。", `「仲良くなったらね」`, "ダメージが入らない。"];
+    }
+    SFX.attack();
+    const dmg = playerAttackDmg();
+    enemyHurt(e, dmg);
+    if(e.hp > 0){
+      const cd = Math.max(1, Math.floor(e.atk/2) + rand(3));
+      player.hp = clamp(player.hp - cd, 0, player.mhp);
+      pushPopup(`HP-${cd}`, "#ff8080", "player");
+      return [`スクショ送信！ ${dmg}ダメージ`, `${e.name}は逆ギレ！ HP-${cd}`];
+    }
+    return [`スクショ送信！ ${dmg}ダメージ`];
+  }},
+  {label:"🏃 にげる", run:(e,b)=>{
+    if(b.isBoss) return ["ボスからは逃げられない！"];
+    const rate = e.invincible ? 1.0 : 0.75;
+    if(Math.random() < rate){
+      b.fled = true;
+      return ["勇者はうまく逃げ切った。"];
+    }
+    return ["逃げきれなかった！"];
+  }},
+];
+
+function applyEffect(d){
+  if(!d) return;
+  if(d.hp)   player.hp   = clamp(player.hp + d.hp, 0, player.mhp);
+  // mp は廃止。互換のため受け流し
+  if(d.gold) player.gold = Math.max(0, player.gold + d.gold);
+}
+function enemyHurt(e,d){
+  e.hp = Math.max(0, e.hp - d);
+  if(d>0){
+    SFX.hit();
+    pushPopup(`-${d}`, "#ff6680", "enemy");
+    if(battle) battle.shake = 8;
+  }
+}
+function pushPopup(text, color, where){
+  if(!battle) return;
+  const baseX = where==="enemy" ? 240 : 120;
+  battle.popups.push({text, color, x: baseX + rand(40)-20, y: where==="enemy" ? 120 : 260, t: 50});
+}
+
+function enemyTurn(){
+  const e = battle.enemy;
+  if(e.hp<=0) return;
+  if(e.flee && Math.random()<e.flee){
+    battle.msg=[
+      `${e.name}：「ごちそうさまでした〜！」`,
+      "颯爽と立ち去った……。テーブルには伝票だけ。",
+      "勇者「(LINEは……うん、ブロックされてる)」",
+    ];
+    battle.fled = true;
+    SFX.miss();
+    return;
+  }
+  const base = e.atk + rand(3);
+  const atk = pick(e.attacks || [{label:"嫌な空気", hp:0.5, mp:0.5}]);
+  // 旧:hp+mp の比率を合算してHP一本に統一
+  const totalRatio = (atk.hp || 0) + (atk.mp || 0);
+  // 0.55倍に圧縮（殴られすぎ対策）
+  const dmg = Math.max(1, Math.floor(base * totalRatio * 0.55));
+  SFX.enemyAtk(); battle.shake = 10;
+  pushPopup(`HP-${dmg}`, "#ff8080", "player");
+  player.hp = clamp(player.hp - dmg, 0, player.mhp);
+  battle.msg = [
+    `${e.name}：「${pick(e.lines)}」`,
+    `${atk.label}！ HP-${dmg} のダメージ！`,
+    pick(HERO_REACT),
+  ];
+  battle.flash = 6;
+}
+
+function endBattle(){
+  const e = battle.enemy;
+  if(battle.isBoss){
+    if(e.hp<=0){
+      bossDefeated = true;
+      for(let y=0;y<ROWS;y++){
+        for(let x=0;x<COLS;x++){
+          if(tile(x,y)==="B") setTile(x,y,"5");
+        }
+      }
+      player.exp += e.exp;
+      // ボス撃破でも全回復はしない
+      msgQueue.push("💀 死神はそっと消えていった。");
+      msgQueue.push("🌸 奥に、普通の声がする。先へ進んでみよう。");
+      battle = null;
+      mode = "world";
+      refreshHUD();
+      return;
+    } else if(player.hp<=0){
+      ending = "bad";
+      mode = "ending";
+      battle = null;
+      return;
+    }
+  }
+  if(e.hp<=0){
+    SFX.victory();
+    player.exp += e.exp;
+    if(e.stalker){
+      player.stalked = true;
+      msgQueue.push(`💢 ${e.name}を撃退したが、ストーカー化された！（歩くたびHP-1）`);
+    }
+    // レベルアップ自体は勝った瞬間に win フェーズ入りで反映済み
+  }
+  battle = null;
+  mode = "world";
+  setBGM("world");
+  refreshHUD();
+}
+
+function drawBattle(){
+  const e = battle.enemy;
+  // screen shake
+  let sox = 0, soy = 0;
+  if(battle.shake>0){
+    sox = (Math.random()*2-1) * battle.shake;
+    soy = (Math.random()*2-1) * battle.shake;
+    battle.shake--;
+  }
+  ctx.save();
+  ctx.translate(sox, soy);
+  // background
+  if(battle.isBoss && IMG.bossbg){
+    ctx.drawImage(IMG.bossbg, 0, 0, VIEW_COLS*TS, VIEW_ROWS*TS);
+    ctx.fillStyle="rgba(0,0,0,0.35)";
+    ctx.fillRect(0,0,VIEW_COLS*TS,VIEW_ROWS*TS);
+  } else {
+    ctx.fillStyle="#0a0a18"; ctx.fillRect(0,0,VIEW_COLS*TS,VIEW_ROWS*TS);
+    // dotted floor for non-boss
+    ctx.fillStyle="#1a1a3a";
+    for(let i=0;i<20;i++){
+      const x = (i*23 + Math.floor(frame/2))%(VIEW_COLS*TS);
+      ctx.fillRect(x, 140 + (i%3)*4, 2, 2);
+    }
+  }
+  // flash
+  if(battle.flash>0){
+    ctx.fillStyle="rgba(255,80,80,0.3)";
+    ctx.fillRect(0,0,VIEW_COLS*TS,VIEW_ROWS*TS);
+    battle.flash--;
+  }
+  // name banner
+  ctx.fillStyle="rgba(0,0,0,0.6)";
+  ctx.fillRect(0, 4, VIEW_COLS*TS, 20);
+  ctx.fillStyle=e.color || "#ffd966";
+  ctx.font="bold 14px 'DotGothic16',monospace";
+  ctx.fillText(`▼ ${e.name} ▼`, VIEW_COLS*TS/2 - 90, 18);
+
+  // enemy sprite
+  const wobble = Math.floor(Math.sin(frame*0.08)*3);
+  let spriteImg = IMG[e.sprite];
+  // build tinted cache once per battle if tint set
+  if(e.tint){
+    if(!battle._tintedImg) battle._tintedImg = tintCanvas(IMG[e.sprite], e.tint, 0.55);
+    spriteImg = battle._tintedImg;
+  }
+  const sz = battle.isBoss ? 170 : 140;
+  if(spriteImg){
+    const cw = spriteImg.width/4, ch = spriteImg.height/2;
+    const sx = (e.col||0)*cw, sy = (e.row||0)*ch;
+    ctx.drawImage(spriteImg, sx, sy, cw, ch, VIEW_COLS*TS/2 - sz/2, 32 + wobble, sz, sz);
+  } else {
+    ctx.fillStyle="#444"; ctx.fillRect(VIEW_COLS*TS/2-sz/2, 32, sz, sz);
+  }
+
+  // enemy HP bar
+  const bw=180, bh=8, bx=VIEW_COLS*TS/2 - bw/2, by=214;
+  ctx.fillStyle="#400"; ctx.fillRect(bx,by,bw,bh);
+  const maxHp = battle.enemyMaxHp || 24;
+  const ratio = clamp(e.hp / maxHp, 0, 1);
+  ctx.fillStyle = e.invincible ? "#888" : "#f55";
+  ctx.fillRect(bx,by,bw*ratio,bh);
+  ctx.strokeStyle="#fff"; ctx.lineWidth=1; ctx.strokeRect(bx,by,bw,bh);
+  if(e.invincible){
+    ctx.fillStyle="#ddd";
+    ctx.font="11px 'DotGothic16',monospace";
+    ctx.fillText("(本命が他にいる…攻撃が効かない)", bx-12, by-2);
+  }
+  if(e.intimacyMode){
+    ctx.fillStyle="#ffd";
+    ctx.font="11px 'DotGothic16',monospace";
+    ctx.fillText(`💗 親密度 ${battle.intimacy||0} / 3`, bx, by-2);
+  }
+
+  // message window — 3行表示（ブラックユーモア用に拡張）
+  drawWindow(4, 222, VIEW_COLS*TS-8, 62);
+  ctx.fillStyle = "#fff";
+  ctx.font = "15px 'DotGothic16',monospace";
+  const mlines = battle.msg.slice(-3);
+  mlines.forEach((l, i) => { ctx.fillText(l, 18, 240 + i*18); });
+  // Enter で進むの点滅マーク
+  const waitingPhase = (battle.phase==="enemyTalk" || battle.phase==="result" || battle.phase==="enemyResult" || battle.phase==="win");
+  if(waitingPhase && battle._canAdvance && Math.floor(frame/14)%2===0){
+    ctx.fillStyle = "#ffd966";
+    ctx.font = "bold 14px 'DotGothic16',monospace";
+    ctx.fillText("▼", VIEW_COLS*TS - 28, 278);
+  }
+
+  // command window + status (cmd phase only)
+  if(battle.phase==="cmd"){
+    drawWindow(4, 286, 200, 94);
+    drawText([
+      `❤️ HP  ${player.hp}/${player.mhp}`,
+      `💰 ${player.gold}円`,
+      `Lv.${player.lv}`,
+    ], 14, 308);
+
+    drawWindow(208, 286, 268, 94);
+    CMDS.forEach((c,i)=>{
+      ctx.fillStyle = (i===battle.sel)?"#ffd966":"#fff";
+      ctx.font="12px 'DotGothic16',monospace";
+      const col = i%2, row = Math.floor(i/2);
+      const cx = 220 + col*128;
+      const cy = 305 + row*22;
+      const prefix = (i===battle.sel)?"▶":" ";
+      ctx.fillText(prefix + c.label, cx, cy);
+    });
+  }
+
+  // damage popups float up & fade
+  if(battle.popups){
+    for(let i = battle.popups.length-1; i>=0; i--){
+      const p = battle.popups[i];
+      const yoff = (50 - p.t) * 0.6;
+      const alpha = Math.min(1, p.t/20);
+      ctx.fillStyle = p.color;
+      ctx.globalAlpha = alpha;
+      ctx.font = "bold 18px 'DotGothic16',monospace";
+      ctx.fillText(p.text, p.x, p.y - yoff);
+      ctx.globalAlpha = 1;
+      p.t--;
+      if(p.t<=0) battle.popups.splice(i,1);
+    }
+  }
+
+  ctx.restore();
+}
+
+function tickBattle(){
+  if(battle.phase==="enemyTalk"){
+    battle._resultTimer++;
+    if(battle._resultTimer >= 25) battle._canAdvance = true;
+    const pressed = (lastKey==="Enter" || lastKey===" ");
+    if((battle._canAdvance && pressed) || battle._resultTimer >= 480){
+      lastKey="";
+      if(!battle._introShown){
+        battle._introShown = true;
+        battle.msg = [
+          `${battle.enemy.name}：「${pick(battle.enemy.lines)}」`,
+          "勇者は返事の最初の一文字を、まだ決めかねている。",
+          pick(HERO_INNER),
+        ];
+        battle._resultTimer = 0;
+        battle._canAdvance = false;
+      } else {
+        battle.phase = "cmd";
+      }
+    }
+    refreshHUD();
+    return;
+  }
+  if(battle.phase==="cmd"){
+    if(lastKey==="ArrowUp" || lastKey==="ArrowLeft"){
+      battle.sel = (battle.sel + CMDS.length - 1) % CMDS.length;
+      lastKey="";
+      SFX.cmdMove();
+    }
+    if(lastKey==="ArrowDown" || lastKey==="ArrowRight"){
+      battle.sel = (battle.sel + 1) % CMDS.length;
+      lastKey="";
+      SFX.cmdMove();
+    }
+    if(lastKey==="Enter" || lastKey===" "){
+      lastKey="";
+      const e = battle.enemy;
+      const res = CMDS[battle.sel].run(e, battle);
+      battle.msg = res;
+      battle.phase = "result";
+      battle._resultTimer = 0;
+      battle._canAdvance = false;
+    }
+  } else if(battle.phase==="result"){
+    battle._resultTimer++;
+    if(battle._resultTimer >= 25) battle._canAdvance = true;
+    const pressed = (lastKey==="Enter" || lastKey===" ");
+    if((battle._canAdvance && pressed) || battle._resultTimer >= 360){
+      lastKey="";
+      if(battle.fled){ battle=null; mode="world"; return; }
+      const e = battle.enemy;
+      if(e.hp<=0){
+        if(battle.isBoss){
+          battle.msg = [
+            `${e.name}を撃退した……？`,
+            "「もっと早く、こうしてくれれば良かったのに」",
+            "勇者「(……結局、最後まで嘘か本気か分からなかった)」",
+          ];
+        } else {
+          // 勝った瞬間にレベルアップを反映（HUDも即更新）
+          player.lv++;
+          player.atk += 3;
+          player.mhp += 12;
+          SFX.levelup();
+          refreshHUD();
+          battle._leveledUp = true;
+          battle.msg = [
+            `${e.name}を撃退した！  ✨ レベルが上がった！ Lv.${player.lv}！`,
+            pick(HERO_GROWTH_A),
+            pick(HERO_GROWTH_B),
+          ];
+        }
+        battle.phase = "win";
+        battle._resultTimer = 0;
+        battle._canAdvance = false;
+      } else {
+        enemyTurn();
+        battle.phase = "enemyResult";
+        battle._resultTimer = 0;
+        battle._canAdvance = false;
+      }
+    }
+  } else if(battle.phase==="enemyResult"){
+    battle._resultTimer++;
+    if(battle._resultTimer >= 25) battle._canAdvance = true;
+    const pressed = (lastKey==="Enter" || lastKey===" ");
+    if((battle._canAdvance && pressed) || battle._resultTimer >= 360){
+      lastKey="";
+      if(battle.fled){ battle=null; mode="world"; return; }
+      if(player.hp<=0){
+        if(battle.isBoss){ ending="bad"; mode="ending"; battle=null; return; }
+        mode="gameover";
+        return;
+      }
+      battle.phase="cmd";
+    }
+  } else if(battle.phase==="win"){
+    battle._resultTimer++;
+    if(battle._resultTimer >= 25) battle._canAdvance = true;
+    const pressed = (lastKey==="Enter" || lastKey===" ");
+    if((battle._canAdvance && pressed) || battle._resultTimer >= 360){
+      lastKey="";
+      endBattle();
+    }
+  }
+  refreshHUD();
+}
+
+// ----- Title -----
+function drawTitle(){
+  const W = VIEW_COLS*TS, H = VIEW_ROWS*TS;
+  if(IMG.title){
+    ctx.drawImage(IMG.title, 0, 0, W, H);
+    // hide the baked-in subtitle "普通の子、未実装。" – this is meant to be discovered
+    ctx.fillStyle="#1a0a26";
+    ctx.fillRect(0, 80, W, 38);
+    // mask the bottom "PRESS ENTER" baked-in label so our blinking prompt is clear
+    ctx.fillStyle="rgba(0,0,0,0.55)";
+    ctx.fillRect(0, H-60, W, 60);
+  } else {
+    ctx.fillStyle="#0b0b16"; ctx.fillRect(0,0,W,H);
+    ctx.fillStyle="#ffd966";
+    ctx.font="bold 28px 'DotGothic16',monospace";
+    ctx.fillText("マチアプRPG", W/2 - 90, 100);
+  }
+  if(Math.floor(frame/30)%2===0){
+    ctx.fillStyle="#ffd966";
+    ctx.font="bold 16px 'DotGothic16',monospace";
+    ctx.fillText("▼ Enter で はじめる ▼", W/2 - 110, H-22);
+  }
+  if(!imagesReady){
+    ctx.fillStyle="#aaa";
+    ctx.font="11px 'DotGothic16',monospace";
+    ctx.fillText("画像読み込み中…", 8, H-4);
+  }
+  if(lastKey==="Enter" || lastKey===" "){
+    lastKey="";
+    // プロローグを再生 → 終わったら写真選択へ
+    if(!player.prologueShown){
+      player.prologueShown = true;
+      mode = "prologueScene";
+      startScene(PROLOGUE_SCENES, () => { mode = "photoSelect"; });
+    } else {
+      mode = "photoSelect";
+    }
+  }
+}
+
+// ----- Photo Select -----
+function drawPhotoSelect(){
+  const W = VIEW_COLS*TS, H = VIEW_ROWS*TS;
+  ctx.fillStyle = "#0b0b22";
+  ctx.fillRect(0, 0, W, H);
+  // ふんわり背景
+  for(let i=0; i<30; i++){
+    const x = ((i*47 + (frame|0))%W);
+    const y = 20 + ((i*23)%(H-40));
+    ctx.fillStyle = `rgba(255,217,102,${0.04 + 0.04*Math.sin(frame*0.03 + i)})`;
+    ctx.fillRect(x, y, 3, 3);
+  }
+  // タイトル
+  ctx.fillStyle = "#ffd966";
+  ctx.font = "bold 17px 'DotGothic16',monospace";
+  ctx.fillText("🖼️ メインの写真、どれにする？", 50, 38);
+  ctx.fillStyle = "#aaa";
+  ctx.font = "11px 'DotGothic16',monospace";
+  ctx.fillText("(敵の出現率だけ変わります)", 90, 56);
+
+  PHOTO_OPTIONS.forEach((opt, i) => {
+    const y = 90 + i*68;
+    const sel = (i === photoSel);
+    if(sel){
+      ctx.fillStyle = "rgba(255,217,102,0.10)";
+      ctx.fillRect(24, y, W-48, 54);
+    }
+    ctx.strokeStyle = sel ? opt.color : "#3a3a55";
+    ctx.lineWidth = sel ? 3 : 1;
+    ctx.strokeRect(24, y, W-48, 54);
+    if(sel){
+      ctx.fillStyle = opt.color;
+      ctx.font = "bold 14px 'DotGothic16',monospace";
+      ctx.fillText("▶", 8, y+26);
+    }
+    ctx.fillStyle = sel ? opt.color : "#ddd";
+    ctx.font = "bold 16px 'DotGothic16',monospace";
+    ctx.fillText(opt.label, 40, y+24);
+    ctx.fillStyle = "#bbb";
+    ctx.font = "12px 'DotGothic16',monospace";
+    ctx.fillText(opt.desc, 40, y+44);
+  });
+
+  // 選択中のフレーバー
+  const sel = PHOTO_OPTIONS[photoSel];
+  ctx.fillStyle = "rgba(0,0,0,0.55)";
+  ctx.fillRect(0, H-46, W, 30);
+  ctx.fillStyle = sel.color;
+  ctx.font = "12px 'DotGothic16',monospace";
+  ctx.fillText("→ " + sel.flavor, 14, H-26);
+
+  if(Math.floor(frame/30)%2===0){
+    ctx.fillStyle = "#ffd966";
+    ctx.font = "bold 12px 'DotGothic16',monospace";
+    ctx.fillText("▲▼ で選択 / Enter で決定", W/2 - 110, H-6);
+  }
+}
+function tickPhotoSelect(){
+  if(lastKey === "ArrowUp" || lastKey === "ArrowLeft"){
+    photoSel = (photoSel + PHOTO_OPTIONS.length - 1) % PHOTO_OPTIONS.length;
+    lastKey = "";
+    SFX.cmdMove();
+  }
+  if(lastKey === "ArrowDown" || lastKey === "ArrowRight"){
+    photoSel = (photoSel + 1) % PHOTO_OPTIONS.length;
+    lastKey = "";
+    SFX.cmdMove();
+  }
+  if(lastKey === "Enter" || lastKey === " "){
+    lastKey = "";
+    const opt = PHOTO_OPTIONS[photoSel];
+    player.encMul = opt.encMul;
+    player.photoLabel = opt.label;
+    msgQueue.push(`📷 「${opt.label}」を選んだ。`);
+    mode = "world";
+    setBGM("world");
+    SFX.bonus();
+  }
+}
+
+// ----- Ending -----
+let endingTrueShown = false;
+function drawEnding(){
+  // 真エンドだけ、最初に5枚の画像シーンを流す
+  if(ending==="true" && !endingTrueShown){
+    endingTrueShown = true;
+    mode = "endingScene";
+    startScene(ENDING_TRUE_SCENES, () => { mode = "ending"; });
+    return;
+  }
+  ctx.fillStyle="#000"; ctx.fillRect(0,0,VIEW_COLS*TS,VIEW_ROWS*TS);
+  ctx.strokeStyle="#e8c46a"; ctx.lineWidth=3;
+  ctx.strokeRect(20,20,VIEW_COLS*TS-40,VIEW_ROWS*TS-40);
+
+  let title, body, color;
+  if(ending==="true"){
+    title="🌸 HAPPY END：普通の子と出会えた";
+    color="#ffe0a0";
+    body=[
+      "玉座の奥に、ふつうの子が立っていた。",
+      "「あ、ここまで来てくれたんですね。」",
+      "",
+      "盛りも煽りも条件交渉もない。",
+      "副業の話も、占いの話もしない。",
+      "ただ、いつものごはんの話をした。",
+      "",
+      "勇者はようやく、",
+      "アプリを閉じることができた。",
+      "",
+      `最終 Lv.${player.lv}  💰${player.gold}円  いいね ${player.likes||0}`,
+    ];
+  } else if(ending==="good"){
+    title="🌅 END：勇者、正気に戻る";
+    color="#80ffb0";
+    body=[
+      "死神は消えた。アプリも閉じた。",
+      "世界は救われなかった。",
+      "でも財布とメンタルは守られた。",
+      "",
+      "（城の奥で、誰かが待っていた気もする……）",
+      "",
+      `最終 Lv.${player.lv}  残り 💰${player.gold}円`,
+    ];
+  } else {
+    title="😇 END：勇者、心が折れた";
+    color="#ff7aa2";
+    body=[
+      "翌朝。",
+      "財布は軽い。LINEは未読。",
+      "記憶は薄い。アプリだけは開いている。",
+      "",
+      "「仲良くなったらね」は永遠だった。",
+    ];
+  }
+  ctx.fillStyle=color;
+  ctx.font="bold 22px 'DotGothic16',monospace";
+  ctx.fillText(title, 60, 90);
+
+  ctx.fillStyle="#fff";
+  ctx.font="14px 'DotGothic16',monospace";
+  body.forEach((l,i)=>{ ctx.fillText(l, 60, 140 + i*22); });
+
+  if(Math.floor(frame/30)%2===0){
+    ctx.fillStyle="#ffd966";
+    ctx.fillText("Enter でもう一度", 60, 330);
+  }
+  if(lastKey==="Enter" || lastKey===" "){ lastKey=""; location.reload(); }
+}
+
+// GAME OVER の背景画像を一度だけ抽選
+let gameOverImgKey = null;
+function drawGameOver(){
+  const W = VIEW_COLS*TS, H = VIEW_ROWS*TS;
+  if(!gameOverImgKey){
+    gameOverImgKey = "gameover" + (1 + Math.floor(Math.random()*5));
+  }
+  const img = IMG[gameOverImgKey];
+  ctx.fillStyle="#000"; ctx.fillRect(0,0,W,H);
+  if(img){
+    const ir = img.width/img.height, cr = W/H;
+    let dw, dh, dx, dy;
+    if(ir > cr){ dw=W; dh=W/ir; dx=0; dy=(H-dh)/2; }
+    else { dh=H; dw=H*ir; dx=(W-dw)/2; dy=0; }
+    ctx.drawImage(img, dx, dy, dw, dh);
+    // 暗めにオーバーレイ
+    ctx.fillStyle="rgba(0,0,0,0.45)";
+    ctx.fillRect(0,0,W,H);
+  }
+  // GAME OVER ラベル
+  ctx.fillStyle="rgba(0,0,0,0.7)";
+  ctx.fillRect(0, 140, W, 100);
+  ctx.fillStyle="#ff5566";
+  ctx.font="bold 32px 'DotGothic16',monospace";
+  ctx.fillText("GAME OVER", W/2-90, 180);
+  ctx.fillStyle="#fff";
+  ctx.font="14px 'DotGothic16',monospace";
+  ctx.fillText("理由：マチアプ疲れ", W/2-70, 220);
+  if(Math.floor(frame/30)%2===0){
+    ctx.fillStyle="#ffd966";
+    ctx.fillText("Enter でリトライ", W/2-70, 320);
+  }
+  if(lastKey==="Enter" || lastKey===" "){ lastKey=""; location.reload(); }
+}
+
+// ----- World movement -----
+let moveCooldown = 0;
+const MOVE_FRAMES = 8;
+function tickWorld(){
+  // advance smooth-slide
+  if(player.moveT < 1){
+    player.moveT = Math.min(1, player.moveT + 1/MOVE_FRAMES);
+  }
+  if(moveCooldown>0){ moveCooldown--; return; }
+  let dx=0, dy=0;
+  if(keys["ArrowUp"])    { dy=-1; player.dir=1; }
+  else if(keys["ArrowDown"])  { dy=1; player.dir=0; }
+  else if(keys["ArrowLeft"])  { dx=-1; player.dir=2; }
+  else if(keys["ArrowRight"]) { dx=1; player.dir=3; }
+  if(dx===0 && dy===0) return;
+
+  const nx = player.x + dx, ny = player.y + dy;
+  const t = tile(nx,ny);
+  if(!walkable(t)) { moveCooldown=4; return; }
+  player.prevX = player.x; player.prevY = player.y;
+  player.x = nx; player.y = ny;
+  player.moveT = 0;
+  player.step++;
+  player.anim++;
+  moveCooldown = MOVE_FRAMES;
+  // 登録ボーナスいいね畑：歩くたび「いいねが届きました」（回復はしない）
+  if(t === "Z"){
+    if(!player.zClaimed){
+      player.zClaimed = true;
+      player.gold += 4000;
+      player.atk += 1;
+      SFX.bonus();
+      msgQueue.push("🎁 登録ボーナス！いいね+50、+4000円、攻撃+1！");
+      refreshHUD();
+    }
+    SFX.like();
+    player.likes = (player.likes||0) + 1;
+    worldPopups.push({text:"💖 いいねが届きました", color:"#ffd966", x:(player.x-cam.x)*TS-8, y:(player.y-cam.y)*TS, t:38});
+  } else if(t === "2"){
+    // マッチング街道（いいね草原）：歩くたびメッセージ受信、+1HP
+    SFX.like();
+    if(player.hp < player.mhp){
+      player.hp = Math.min(player.mhp, player.hp + 1);
+      refreshHUD();
+    }
+    worldPopups.push({text:"📨 メッセージが届きました  HP+1", color:"#a0f0ff", x:(player.x-cam.x)*TS-26, y:(player.y-cam.y)*TS, t:38});
+  } else if(t === "3"){
+    // ラブホ街（沼）：歩くたび、足跡 / 既読スルー / ブロック5種 で-1HP
+    const swamp = pick(SWAMP_EVENTS);
+    SFX.miss();
+    player.hp = Math.max(0, player.hp - 1);
+    refreshHUD();
+    worldPopups.push({text:swamp + "  HP-1", color:"#ff6680", x:(player.x-cam.x)*TS-30, y:(player.y-cam.y)*TS, t:42});
+    if(player.hp <= 0){
+      mode = "gameover";
+      return;
+    }
+  } else {
+    SFX.step();
+  }
+  // ストーカー化中は歩くたびにHPを削られる
+  if(player.stalked){
+    player.hp = Math.max(0, player.hp - 1);
+    refreshHUD();
+    if(player.hp <= 0){
+      mode = "gameover";
+      return;
+    }
+  }
+  maybeEncounter();
+}
+
+// ----- Main loop -----
+function loop(){
+  frame++;
+  if(mode==="title"){
+    drawTitle();
+  } else if(mode==="prologueScene" || mode==="endingScene"){
+    tickScene();
+    drawScene();
+  } else if(mode==="photoSelect"){
+    tickPhotoSelect();
+    drawPhotoSelect();
+  } else if(mode==="world"){
+    tickWorld();
+    drawWorld();
+    // popups from queue
+    if(msgQueue.length>0){
+      drawWindow(8, VIEW_ROWS*TS-60, VIEW_COLS*TS-16, 52);
+      drawText([msgQueue[0]], 24, VIEW_ROWS*TS-36);
+      if(lastKey==="Enter" || lastKey===" "){
+        lastKey=""; msgQueue.shift();
+      }
+    }
+  } else if(mode==="battle"){
+    tickBattle();
+    if(battle && mode==="battle") drawBattle();
+  } else if(mode==="meetup"){
+    tickMeetup();
+    if(meetup) drawMeetup();
+  } else if(mode==="ending"){
+    drawEnding();
+  } else if(mode==="gameover"){
+    drawGameOver();
+  }
+  requestAnimationFrame(loop);
+}
+
+refreshHUD();
+loop();
+loadAllImages();
+</script>
+</body>
+</html>
